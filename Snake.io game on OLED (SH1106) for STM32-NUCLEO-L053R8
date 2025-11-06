@@ -1,0 +1,187 @@
+//Snake.io game on OLED (SH1106) for STM32-NUCLEO-L053R8
+//For Arduino***
+//Created by Ashley Chu
+
+#include <U8g2lib.h>
+#include <Wire.h>
+
+U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
+
+// 搖桿
+int joyX = A0;
+int joyY = A1;
+int joySW = 2;
+
+// 搖桿中心校正
+int centerX = 706;
+int centerY = 684;
+int deadzone = 80; // 容許範圍
+
+// 遊戲格子設定
+#define GRID_SIZE 4
+#define GRID_WIDTH  (128/GRID_SIZE)
+#define GRID_HEIGHT (64/GRID_SIZE)
+
+// 蛇最大長度
+#define MAX_LENGTH 150
+
+// 蛇狀態
+int snakeX[MAX_LENGTH], snakeY[MAX_LENGTH];
+int snakeLength = 3;
+int dirX = 1, dirY = 0;  // 初始方向
+int foodX, foodY;
+bool gameOver = false;
+bool gameStarted = false;
+int score = 0;
+int speedDelay = 200; // 初始速度 (ms)
+
+// 時間控制
+unsigned long lastMoveTime = 0;
+
+void spawnFood() {
+  foodX = random(0, GRID_WIDTH);
+  foodY = random(0, GRID_HEIGHT);
+}
+
+void resetGame() {
+  snakeLength = 3;
+  int startX = GRID_WIDTH/2;
+  int startY = GRID_HEIGHT/2;
+  snakeX[0] = startX; snakeY[0] = startY;
+  snakeX[1] = startX-1; snakeY[1] = startY;
+  snakeX[2] = startX-2; snakeY[2] = startY;
+  dirX = 1; dirY = 0;
+  score = 0;
+  speedDelay = 200;
+  spawnFood();
+  gameOver = false;
+  gameStarted = false;
+  lastMoveTime = millis();
+}
+
+void setup() {
+  pinMode(joySW, INPUT_PULLUP);
+  u8g2.begin();
+  randomSeed(analogRead(A2));
+  resetGame();
+}
+
+void readJoystick() {
+  int xVal = analogRead(joyX);
+  int yVal = analogRead(joyY);
+
+  int newDirX = dirX;
+  int newDirY = dirY;
+
+  int dx = xVal - centerX;
+  int dy = yVal - centerY;
+
+  if (abs(dx) > abs(dy)) {
+    // 水平優先
+    if (dx < -deadzone) { newDirX = -1; newDirY = 0; }
+    else if (dx > deadzone) { newDirX = 1; newDirY = 0; }
+  } else {
+    // 垂直優先
+    if (dy < -deadzone) { newDirX = 0; newDirY = -1; }
+    else if (dy > deadzone) { newDirX = 0; newDirY = 1; }
+  }
+
+  // 禁止直接反向
+  if (!(newDirX == -dirX && newDirY == -dirY)) {
+    dirX = newDirX;
+    dirY = newDirY;
+  }
+}
+
+void moveSnake() {
+  // 移動蛇身
+  for (int i = snakeLength-1; i > 0; i--) {
+    snakeX[i] = snakeX[i-1];
+    snakeY[i] = snakeY[i-1];
+  }
+  snakeX[0] += dirX;
+  snakeY[0] += dirY;
+
+  // 碰撞檢查
+  if (snakeX[0] < 0 || snakeX[0] >= GRID_WIDTH || 
+      snakeY[0] < 0 || snakeY[0] >= GRID_HEIGHT) {
+    gameOver = true;
+  }
+  for (int i = 1; i < snakeLength; i++) {
+    if (snakeX[0] == snakeX[i] && snakeY[0] == snakeY[i]) gameOver = true;
+  }
+
+  // 吃食物
+  if (snakeX[0] == foodX && snakeY[0] == foodY) {
+    if (snakeLength < MAX_LENGTH) snakeLength++;
+    score++;
+    if (speedDelay > 80) speedDelay -= 10;
+    spawnFood();
+  }
+}
+
+void drawGame() {
+  u8g2.clearBuffer();
+
+  // 畫蛇
+  for (int i = 0; i < snakeLength; i++) {
+    u8g2.drawBox(snakeX[i]*GRID_SIZE, snakeY[i]*GRID_SIZE, GRID_SIZE, GRID_SIZE);
+  }
+
+  // 畫食物
+  u8g2.drawFrame(foodX*GRID_SIZE, foodY*GRID_SIZE, GRID_SIZE, GRID_SIZE);
+
+  // 畫分數
+  u8g2.setFont(u8g2_font_5x7_tr);
+  u8g2.setCursor(0, 10);
+  u8g2.print("Score: "); u8g2.print(score);
+
+  u8g2.sendBuffer();
+}
+
+void loop() {
+  // 等待開始
+  if (!gameStarted) {
+    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_ncenB08_tr);
+    u8g2.drawStr(20, 25, "SNAKE GAME");
+    u8g2.drawStr(10, 50, "Press SW to Start");
+    u8g2.sendBuffer();
+
+    if (digitalRead(joySW) == LOW) {
+      delay(300);
+      gameStarted = true;
+      lastMoveTime = millis();
+    }
+    return;
+  }
+
+  // 遊戲結束畫面
+  if (gameOver) {
+    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_ncenB08_tr);
+    u8g2.drawStr(20, 20, "GAME OVER!");
+    u8g2.setCursor(20, 40);
+    u8g2.print("Score: "); u8g2.print(score);
+    u8g2.drawStr(10, 60, "Press SW to restart");
+    u8g2.sendBuffer();
+
+    if (digitalRead(joySW) == LOW) {
+      delay(300);
+      resetGame();
+    }
+    return;
+  }
+
+  // 隨時讀搖桿方向
+  readJoystick();
+
+  // 控制蛇移動
+  if (millis() - lastMoveTime > speedDelay) {
+    lastMoveTime = millis();
+    moveSnake();
+  }
+
+  // 畫面刷新
+  drawGame();
+}
