@@ -1,0 +1,291 @@
+//Tetris on LED matrix of Arduino R4 Wifi
+//第 1 部分：系統初始化與資料結構----------------------------------------------------------------------------------
+#include "Arduino_LED_Matrix.h"
+
+ArduinoLEDMatrix matrix;
+
+// === 按鍵腳位 ===
+const int btnLeft = 2, btnRight = 3, btnRotate = 4, btnDown = 5, btnReset = 6;
+
+// === 按鍵旗標 ===
+volatile bool flagLeft = false, flagRight = false, flagRotate = false, flagDown = false, flagReset = false;
+
+// === 遊戲參數 ===
+const int WIDTH = 12;
+const int HEIGHT = 8;
+uint8_t board[8][12] = {0};
+
+unsigned long lastDropTime = 0;
+unsigned long dropInterval = 600;
+
+bool gameOver = false;
+
+// === 方塊資料 ===
+struct Tetromino {
+  byte shape[4][4];
+  int size;
+};
+
+// === 7 種方塊形狀（4x4）===
+const Tetromino tetrominoes[7] = {
+  { // I
+    {{0,0,0,0},
+     {1,1,1,0},
+     {0,0,0,0},
+     {0,0,0,0}}, 4
+  },
+  { // O
+    {{1,1,0,0},
+     {0,0,0,0},
+     {0,0,0,0},
+     {0,0,0,0}}, 2
+  },
+  { // T
+    {{0,1,0,0},
+     {1,1,1,0},
+     {0,0,0,0},
+     {0,0,0,0}}, 3
+  },
+  { // L
+    {{0,0,1,0},
+     {0,1,1,0},
+     {0,0,0,0},
+     {0,0,0,0}}, 3
+  },
+  { // J
+    {{0,1,0,0},
+     {0,0,0,0},
+     {0,0,0,0},
+     {0,0,0,0}}, 3
+  },
+  { // S
+    {{0,1,0,0},
+     {0,1,0,0},
+     {0,1,0,0},
+     {0,0,0,0}}, 3
+  },
+  { // Z
+    {{0,1,0,0},
+     {0,1,1,0},
+     {0,0,0,0},
+     {0,0,0,0}}, 3
+  }
+};
+
+// === 當前方塊狀態 ===
+Tetromino current;
+int curX, curY;
+byte rotated[4][4]; // 暫存旋轉形狀
+
+// === 函式原型（第2段會用） ===
+void spawnNewBlock();
+bool isColliding(int x, int y, byte shape[4][4], int size);
+void lockBlock();
+void rotateBlock();
+void clearLines();
+void drawBoard();
+void resetGame();
+//第 2 部分：主邏輯 + 中斷 + 遊戲處理---------------------------------------------------------------------------------------
+void setup() {
+  Serial.begin(9600);
+  matrix.begin();
+
+  pinMode(btnLeft, INPUT_PULLUP);
+  pinMode(btnRight, INPUT_PULLUP);
+  pinMode(btnRotate, INPUT_PULLUP);
+  pinMode(btnDown, INPUT_PULLUP);
+  pinMode(btnReset, INPUT_PULLUP);
+
+  attachInterrupt(digitalPinToInterrupt(btnLeft), isrLeft, FALLING);
+  attachInterrupt(digitalPinToInterrupt(btnRight), isrRight, FALLING);
+  attachInterrupt(digitalPinToInterrupt(btnRotate), isrRotate, FALLING);
+  attachInterrupt(digitalPinToInterrupt(btnDown), isrDown, FALLING);
+  attachInterrupt(digitalPinToInterrupt(btnReset), isrReset, FALLING);
+
+  waitForAnyKey();
+  spawnNewBlock();
+}
+
+// === 開機等待任意鍵 ===
+void waitForAnyKey() {
+  // 顯示自訂像素圖
+  uint8_t custom[8][12] = {
+    {0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,1,0,0,0,1,0,0,1,0,0,0},
+    {0,1,0,0,0,1,0,0,0,0,0,0},
+    {0,1,1,1,1,1,0,0,1,0,0,0},
+    {0,1,0,0,0,1,0,0,1,0,0,0},
+    {0,1,0,0,0,1,0,0,1,0,0,0},
+    {0,1,0,0,0,1,0,0,1,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0}
+  };
+
+  // 持續顯示直到按下任意鍵
+  while (digitalRead(btnLeft) == HIGH && digitalRead(btnRight) == HIGH && digitalRead(btnRotate) == HIGH && digitalRead(btnDown) == HIGH && digitalRead(btnReset) == HIGH) {
+    matrix.renderBitmap(custom, 8, 12);
+    delay(500);
+  }
+  matrix.clear();
+}
+void loop() {
+  if (flagLeft)  { 
+    Serial.println("btnLeft pressed");
+    if (!isColliding(curX - 1, curY, current.shape, current.size)) curX--; 
+    flagLeft = false; 
+  }
+  if (flagRight) { 
+    Serial.println("btnRight pressed");
+    if (!isColliding(curX + 1, curY, current.shape, current.size)) curX++; 
+    flagRight = false; 
+  }
+  if (flagRotate){ 
+    Serial.println("btnRotate pressed");
+    rotateBlock(); 
+    flagRotate = false; 
+  }
+  if (flagDown)  {
+    Serial.println("btnDown pressed");
+    if (!isColliding(curX, curY + 1, current.shape, current.size)) {
+      curY++;
+    } else {
+      lockBlock();
+      clearLines();
+      spawnNewBlock();
+    }
+    flagDown = false;
+  }
+  if (flagReset) { 
+    Serial.println("btnReset pressed");
+    resetGame(); 
+    flagReset = false; 
+  }
+
+  // 自動下落
+  if (!gameOver && millis() - lastDropTime > dropInterval) {
+    if (!isColliding(curX, curY + 1, current.shape, current.size)) {
+      curY++;
+    } else {
+      lockBlock();
+      clearLines();
+      spawnNewBlock();
+    }
+    lastDropTime = millis();
+  }
+
+  drawBoard();
+  delay(50);
+}
+
+// === 中斷處理 ===
+void isrLeft()   { flagLeft = true; }
+void isrRight()  { flagRight = true; }
+void isrRotate() { flagRotate = true; }
+void isrDown()   { flagDown = true; }
+void isrReset()  { flagReset = true; }
+
+// === 畫面更新 ===
+void drawBoard() {
+  uint8_t frame[8][12] = {0};
+  for (int y = 0; y < HEIGHT; y++) {
+    for (int x = 0; x < WIDTH; x++) {
+      frame[y][x] = board[y][x];
+    }
+  }
+
+  // 畫出正在下落的方塊
+  for (int i = 0; i < current.size; i++) {
+    for (int j = 0; j < current.size; j++) {
+      if (current.shape[i][j]) {
+        int drawX = curX + j;
+        int drawY = curY + i;
+        if (drawY >= 0 && drawY < HEIGHT && drawX >= 0 && drawX < WIDTH) {
+          frame[drawY][drawX] = 1;
+        }
+      }
+    }
+  }
+  matrix.renderBitmap(frame, 8, 12);
+}
+
+// === 產生新方塊 ===
+void spawnNewBlock() {
+  current = tetrominoes[random(0, 7)];
+  curX = 4; // 居中
+  curY = 0;
+
+  if (isColliding(curX, curY, current.shape, current.size)) {
+    gameOver = true;
+    Serial.println("GAME OVER!");
+  }
+}
+
+// === 檢查是否撞到牆或方塊 ===
+bool isColliding(int x, int y, byte shape[4][4], int size) {
+  for (int i = 0; i < size; i++) {
+    for (int j = 0; j < size; j++) {
+      if (shape[i][j]) {
+        int nx = x + j;
+        int ny = y + i;
+        if (nx < 0 || nx >= WIDTH || ny >= HEIGHT) return true;
+        if (ny >= 0 && board[ny][nx]) return true;
+      }
+    }
+  }
+  return false;
+}
+
+// === 鎖定方塊到場地 ===
+void lockBlock() {
+  for (int i = 0; i < current.size; i++) {
+    for (int j = 0; j < current.size; j++) {
+      if (current.shape[i][j]) {
+        int nx = curX + j;
+        int ny = curY + i;
+        if (nx >= 0 && nx < WIDTH && ny >= 0 && ny < HEIGHT) {
+          board[ny][nx] = 1;
+        }
+      }
+    }
+  }
+}
+
+// === 旋轉方塊（90 度）===
+void rotateBlock() {
+  for (int i = 0; i < current.size; i++) {
+    for (int j = 0; j < current.size; j++) {
+      rotated[j][current.size - 1 - i] = current.shape[i][j];
+    }
+  }
+  if (!isColliding(curX, curY, rotated, current.size)) {
+    memcpy(current.shape, rotated, sizeof(rotated));
+  }
+}
+
+// === 消除滿行 ===
+void clearLines() {
+  for (int y = HEIGHT - 1; y >= 0; y--) {
+    bool full = true;
+    for (int x = 0; x < WIDTH; x++) {
+      if (!board[y][x]) {
+        full = false;
+        break;
+      }
+    }
+    if (full) {
+      for (int i = y; i > 0; i--) {
+        for (int j = 0; j < WIDTH; j++) {
+          board[i][j] = board[i - 1][j];
+        }
+      }
+      for (int j = 0; j < WIDTH; j++) board[0][j] = 0;
+      y++; // 再檢查一次這行（可能連續兩行滿）
+    }
+  }
+}
+
+// === 重置遊戲 ===
+void resetGame() {
+  memset(board, 0, sizeof(board));
+  gameOver = false;
+  spawnNewBlock();
+}
